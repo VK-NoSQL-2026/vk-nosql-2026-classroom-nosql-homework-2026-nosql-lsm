@@ -1,134 +1,63 @@
 package ru.vk.itmo.reference;
 
-import java.util.Collection;
-import java.util.Comparator;
-import java.util.Iterator;
-import java.util.NoSuchElementException;
-import java.util.PriorityQueue;
+import ru.vk.itmo.Entry;
 
-public class MergeIterator<T> implements Iterator<T> {
+import java.lang.foreign.MemorySegment;
+import java.util.*;
 
-    private final PriorityQueue<PeekIterator<T>> priorityQueue;
-    private final Comparator<T> comparator;
-    PeekIterator<T> peekIterator;
+final class MergeIterator implements Iterator<Entry<MemorySegment>> {
+    private final Queue<WeightedPeekingEntryIterator> iterators;
 
-    public MergeIterator(Collection<Iterator<T>> iterators, Comparator<T> comparator) {
-        this.comparator = comparator;
-        Comparator<PeekIterator<T>> peekComp = (o1, o2) -> comparator.compare(o1.peek(), o2.peek());
-        priorityQueue = new PriorityQueue<>(
-                iterators.size(),
-                peekComp.thenComparing(o -> -o.id)
-        );
+    MergeIterator(final List<WeightedPeekingEntryIterator> iterators) {
+        assert iterators.stream().allMatch(WeightedPeekingEntryIterator::hasNext);
 
-        int id = 0;
-        for (Iterator<T> iterator : iterators) {
-            if (iterator.hasNext()) {
-                priorityQueue.add(new PeekIterator<>(id++, iterator));
-            }
-        }
-    }
-
-    private PeekIterator<T> peek() {
-        while (peekIterator == null) {
-            peekIterator = priorityQueue.poll();
-            if (peekIterator == null) {
-                return null;
-            }
-
-            // |     it1    |   it2  |   it3  | ...
-            // | k1, k2, k3 | k2, k4 | k1, k4 | ...
-            while (true) {
-                PeekIterator<T> next = priorityQueue.peek();
-                if (next == null) {
-                    break;
-                }
-
-                int compare = comparator.compare(peekIterator.peek(), next.peek());
-                if (compare == 0) {
-                    PeekIterator<T> poll = priorityQueue.poll();
-                    if (poll != null) {
-                        poll.next();
-                        if (poll.hasNext()) {
-                            priorityQueue.add(poll);
-                        }
-                    }
-                } else {
-                    break;
-                }
-            }
-
-            if (skip(peekIterator.peek())) {
-                peekIterator.next();
-                if (peekIterator.hasNext()) {
-                    priorityQueue.add(peekIterator);
-                }
-                peekIterator = null;
-            }
-        }
-
-        return peekIterator;
-    }
-
-    protected boolean skip(T t) {
-        return false;
+        this.iterators = new PriorityQueue<>(iterators);
     }
 
     @Override
     public boolean hasNext() {
-        return peek() != null;
+        return !iterators.isEmpty();
     }
 
     @Override
-    public T next() {
-        PeekIterator<T> peek = peek();
-        if (peek == null) {
+    public Entry<MemorySegment> next() {
+        if (!hasNext()) {
             throw new NoSuchElementException();
         }
-        T next = peek.next();
-        this.peekIterator = null;
-        if (peek.hasNext()) {
-            priorityQueue.add(peek);
-        }
-        return next;
-    }
 
-    private static class PeekIterator<T> implements Iterator<T> {
+        final WeightedPeekingEntryIterator top = iterators.remove();
+        final Entry<MemorySegment> result = top.next();
 
-        public final int id;
-        private final Iterator<T> delegate;
-        private T peekSegment;
-
-        private PeekIterator(int id, Iterator<T> delegate) {
-            this.id = id;
-            this.delegate = delegate;
+        if (top.hasNext()) {
+            // Not exhausted
+            iterators.add(top);
         }
 
-        @Override
-        public boolean hasNext() {
-            if (peekSegment == null) {
-                return delegate.hasNext();
+        // Remove older versions of the key
+        while (true) {
+            final WeightedPeekingEntryIterator iterator = iterators.peek();
+            if (iterator == null) {
+                // Nothing left
+                break;
             }
-            return true;
+
+            // Skip entries with the same key
+            final Entry<MemorySegment> entry = iterator.peek();
+            if (MemorySegmentComparator.INSTANCE.compare(result.key(), entry.key()) != 0) {
+                // Reached another key
+                break;
+            }
+
+            // Drop
+            iterators.remove();
+            // Skip
+            iterator.next();
+            if (iterator.hasNext()) {
+                // Not exhausted
+                iterators.add(iterator);
+            }
         }
 
-        @Override
-        public T next() {
-            if (!hasNext()) {
-                throw new NoSuchElementException();
-            }
-            T peek = peek();
-            this.peekSegment = null;
-            return peek;
-        }
-
-        private T peek() {
-            if (peekSegment == null) {
-                if (!delegate.hasNext()) {
-                    return null;
-                }
-                peekSegment = delegate.next();
-            }
-            return peekSegment;
-        }
+        return result;
     }
 }
